@@ -1,0 +1,23 @@
+# Visual Studio
+.vs/
+*.user
+*.VC.db
+*.log
+
+# 构建输出
+x64/
+Debug/
+Release/
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ipch
+*.idb
+*.ilk
+*.aps
+
+# 其他
+*.sdf
+*.opensdf
+*.cache

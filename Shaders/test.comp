@@ -1,0 +1,39 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+struct Vertex {
+    vec2 pos;
+    vec3 color;
+};
+
+// 全局定义正方形的4个顶点局部坐标（常量）
+const vec2 SQUARE_LOCAL_POS[4] = vec2[](
+    vec2(-1, -1), // 左下
+    vec2( 1, -1), // 右下
+    vec2( 1,  1), // 右上
+    vec2(-1,  1)  // 左上
+);
+
+layout(std430, binding = 0) buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(binding = 1) uniform UniformBuffer {
+    float time;
+} ubo;
+
+void main() {
+    // 确保只处理 4 个顶点（正方形）
+    if (gl_GlobalInvocationID.x >= 4) return;
+
+    // 根据 time 动态计算颜色（RGB 循环变化）
+    vec3 color = vec3(
+        sin(ubo.time * 1.0) * 0.5 + 0.5,  // R: 随时间正弦变化
+        sin(ubo.time * 2.0) * 0.5 + 0.5,  // G: 变化速度更快
+        sin(ubo.time * 0.5) * 0.5 + 0.5   // B: 变化速度更慢
+    );
+
+    // 写入顶点数据
+    vertices[gl_GlobalInvocationID.x].pos = SQUARE_LOCAL_POS[gl_GlobalInvocationID.x];
+    vertices[gl_GlobalInvocationID.x].color = color;
+}
