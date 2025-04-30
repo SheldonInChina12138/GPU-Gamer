@@ -2,22 +2,10 @@
 
 const int WIDTH = 800;
 const int HEIGHT = 800;
-const int BOARD_SIZE = 20;
-// 
-const int VERTEX_COUNT = 4; 
-const int INDEX_COUNT = 6;  
 
-// 简化顶点数据结构，只包含最终位置和颜色
-struct Vertex {
-    alignas(8) glm::vec2 pos;
-    alignas(16) glm::vec3 color;
-};
-
-// Compute Shader使用的参数
-struct ComputeUBO {
-    float time; //有用的time占用4字节
-    float padding[3];  //为了让UBO对齐到16字节，我们需要塞一个12字节的padding进去
-};
+const int Grid_Dimen = 4;//方阵维度
+const int VERTEX_COUNT = Grid_Dimen * Grid_Dimen * 4;
+const int INDEX_COUNT = Grid_Dimen * Grid_Dimen * 6;
 
 int main() {
     //==============Init Vulkan===================
@@ -69,15 +57,31 @@ int main() {
     auto [vertexBuffer, vertexBufferMemory] = createBuffer(device, physicalDevice,
         sizeof(Vertex) * VERTEX_COUNT,
         vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst);//注意：改为Storage Buffer，用来接收ComputeShader计算出的顶点
+    std::cout << "fuck";
+    // 【改】索引缓冲
+    std::vector<uint16_t> indices(INDEX_COUNT);
+    // 为每个正方形填充6个索引
+    for (int i = 0; i < Grid_Dimen * Grid_Dimen; i++) {
+        const int base = i * 4;
+        const int offset = i * 6;
 
-    // 索引缓冲
-    uint16_t indices[INDEX_COUNT] = { 0,1,2,0,2,3 };
+        // 第一个三角形
+        indices[offset] = base;
+        indices[offset + 1] = base + 1;
+        indices[offset + 2] = base + 2;
+
+        // 第二个三角形
+        indices[offset + 3] = base;
+        indices[offset + 4] = base + 2;
+        indices[offset + 5] = base + 3;
+    }
+    
     auto [indexBuffer, indexBufferMemory] = createBuffer(device, physicalDevice,
         sizeof(uint16_t) * INDEX_COUNT,
         vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst);
-    
+    std::cout << "fuck1";
     void* indexData = device->mapMemory(*indexBufferMemory, 0, sizeof(uint16_t) * INDEX_COUNT);
-    memcpy(indexData, indices, sizeof(uint16_t) * INDEX_COUNT);
+    memcpy(indexData, indices.data(), sizeof(uint16_t) * INDEX_COUNT);
     device->unmapMemory(*indexBufferMemory);
 
     // 简化顶点绑定描述
@@ -206,7 +210,7 @@ int main() {
         *computePipelineLayout,
         0, 1, &*computeDescriptorSets[0],
         0, nullptr);
-    computeCommandBuffer->dispatch(4, 1, 1);
+    computeCommandBuffer->dispatch(2, 2, 1);//【改】这里决定了gl_GlobalInvocationID
     computeCommandBuffer->end();
 
     // 帧循环
@@ -230,20 +234,7 @@ int main() {
         vk::SubmitInfo computeSubmitInfo({}, {}, *computeCommandBuffer, *computeFinishedSemaphore);
         computeQueue.submit(computeSubmitInfo, nullptr);
         //--------------打印shader参数----------------
-        void* mappedData;
-        vkMapMemory(*device, *vertexBufferMemory, 0, sizeof(Vertex) * 4, 0, &mappedData); // 只映射前4个顶点
-
-        Vertex* vertices = (Vertex*)mappedData;
-        printf("---- 顶点数据验证 ----\n");
-        for (int i = 0; i < 4; i++) {
-            printf("顶点%d: pos=(%.2f, %.2f), color=(%.2f, %.2f, %.2f)\n",
-                i,
-                vertices[i].pos[0], vertices[i].pos[1],
-                vertices[i].color[0], vertices[i].color[1], vertices[i].color[2]);
-        }
-
-        vkUnmapMemory(*device, *vertexBufferMemory);
-
+        
         // 图形部分
         uint32_t imageIndex = device->acquireNextImageKHR(*swapchain, UINT64_MAX, *imageAvailable).value;
 

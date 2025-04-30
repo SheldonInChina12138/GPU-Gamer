@@ -1,12 +1,17 @@
 #version 450
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 2, local_size_y = 2, local_size_z = 1) in;
 
 struct Vertex {
     vec2 pos;
     vec3 color;
 };
 
-// 全局定义正方形的4个顶点局部坐标（常量）
+// 方阵维度
+const int GRID_DIMEN = 4;
+// 行列间隙
+const float BIAS = 0.05;
+
+// 单个正方形的4个顶点局部坐标向量
 const vec2 SQUARE_LOCAL_POS[4] = vec2[](
     vec2(-1, -1), // 左下
     vec2( 1, -1), // 右下
@@ -23,17 +28,33 @@ layout(binding = 1) uniform UniformBuffer {
 } ubo;
 
 void main() {
-    // 确保只处理 4 个顶点（正方形）
-    if (gl_GlobalInvocationID.x >= 4) return;
+    // 计算 2D 线程索引 (x,y)
+    int squareX = int(gl_GlobalInvocationID.x);
+    int squareY = int(gl_GlobalInvocationID.y);
+    
+    // 合并为 1D 索引 (0~3)
+    int squareIndex = squareY * GRID_DIMEN + squareX;
+    if (squareIndex >= GRID_DIMEN * GRID_DIMEN) return;
 
-    // 根据 time 动态计算颜色（RGB 循环变化）
-    vec3 color = vec3(
-        sin(ubo.time * 1.0) * 0.5 + 0.5,  // R: 随时间正弦变化
-        sin(ubo.time * 2.0) * 0.5 + 0.5,  // G: 变化速度更快
-        sin(ubo.time * 0.5) * 0.5 + 0.5   // B: 变化速度更慢
+    // 现在 squareIndex 的范围是 0~3（对应 4 个正方形）
+    int row = squareIndex / GRID_DIMEN;//纵向坐标
+    int col = squareIndex % GRID_DIMEN;//横向坐标
+
+    // 计算中心位置（修正后的版本）
+    float cellSize = 2.0 / float(GRID_DIMEN);
+    vec2 center = vec2(
+        -1 + cellSize * (0.5 + col),
+        -1 + cellSize * (0.5 + row)
     );
 
     // 写入顶点数据
-    vertices[gl_GlobalInvocationID.x].pos = SQUARE_LOCAL_POS[gl_GlobalInvocationID.x];
-    vertices[gl_GlobalInvocationID.x].color = color;
+    for (int i = 0; i < 4; i++) {
+        int vertexIndex = squareIndex * 4 + i;
+        vertices[vertexIndex].pos = SQUARE_LOCAL_POS[i] * 0.5 * cellSize * (1 - BIAS) + center;
+        vertices[vertexIndex].color = vec3(
+            sin(ubo.time + float(squareIndex)), 
+            cos(ubo.time + float(squareIndex)), 
+            0.5
+        );
+    }
 }

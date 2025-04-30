@@ -11,6 +11,20 @@
 #include <chrono>
 #include <cstring>
 
+//==================parameters============================
+// 简化顶点数据结构，只包含最终位置和颜色
+struct Vertex {
+    alignas(8) glm::vec2 pos;
+    alignas(16) glm::vec3 color;
+};
+
+// Compute Shader使用的参数
+struct ComputeUBO {
+    float time; //有用的time占用4字节
+    float padding[3];  //为了让UBO对齐到16字节，我们需要塞一个12字节的padding进去
+};
+
+//========================Tools Func=============================
 //vulkan调试工具
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -82,7 +96,26 @@ createBuffer(
     return { std::move(buffer), std::move(memory) };  // 显式转移所有权
 }
 
-//-----------------About Vulkan----------------------
+void shaderPrinter(
+    const vk::UniqueDevice& device, 
+    const vk::UniqueDeviceMemory vertexBufferMemory) 
+{
+    void* mappedData;
+    vkMapMemory(*device, *vertexBufferMemory, 0, sizeof(Vertex) * 4, 0, &mappedData); // 只映射前4个顶点
+
+    Vertex* vertices = (Vertex*)mappedData;
+    printf("---- 顶点数据验证 ----\n");
+    for (int i = 0; i < 4; i++) {
+        uint16_t index = 8;//想打印第几个正方形（n*4）
+        printf("顶点%d: pos=(%.2f, %.2f), color=(%.2f, %.2f, %.2f)\n",
+            i,
+            vertices[i + index].pos[0], vertices[i + index].pos[1],
+            vertices[i + index].color[0], vertices[i + index].color[1], vertices[i + index].color[2]);
+    }
+    vkUnmapMemory(*device, *vertexBufferMemory);
+}
+
+//-----------------Init Vulkan----------------------
 //创建窗口(初始化 GLFW，告诉它“我不打算用 OpenGL”)
 GLFWwindow* InitWindow(int w, int h, std::string winName) {
     glfwInit();
