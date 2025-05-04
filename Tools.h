@@ -12,16 +12,33 @@
 #include <cstring>
 
 //==================parameters============================
-// 简化顶点数据结构，只包含最终位置和颜色
+//------const-------
+const int WIDTH = 800;
+const int HEIGHT = 800;
+
+const int Grid_Dimen = 20;//方阵维度
+const int VERTEX_COUNT = Grid_Dimen * Grid_Dimen * 4;
+const int INDEX_COUNT = Grid_Dimen * Grid_Dimen * 6;
+
+//------struct-------
 struct Vertex {
     alignas(8) glm::vec2 pos;
     alignas(16) glm::vec3 color;
 };
 
-// Compute Shader使用的参数
 struct ComputeUBO {
-    float time; //有用的time占用4字节
-    float padding[3];  //为了让UBO对齐到16字节，我们需要塞一个12字节的padding进去
+    float time;//秒表
+    float padding[3];
+    glm::vec4 control; // x=W, y=A, z=S, w=D (分别对应上下左右按键状态)
+};
+//不传输，只用来计算大小
+struct SnakeSegment {
+    float recordTime;     // 4字节
+    int snakeLen;       // 4字节
+    glm::ivec2 snakeDir;// 8字节
+    glm::ivec2 foodPos; // 8字节
+    glm::ivec2 tempTest;// 8
+    glm::ivec2 pos;     // 8字节
 };
 
 //========================Tools Func=============================
@@ -30,6 +47,10 @@ const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
     "VK_LAYER_LUNARG_api_dump"
 };
+
+uint32_t alignTo16(uint32_t n) {
+    return ((n + 15) / 16) * 16;
+}
 
 //读取文件
 std::vector<char> readFile(const std::string& filename) {
@@ -96,9 +117,51 @@ createBuffer(
     return { std::move(buffer), std::move(memory) };  // 显式转移所有权
 }
 
+// 添加纹理创建函数
+std::tuple<vk::UniqueImage, vk::UniqueDeviceMemory, vk::UniqueImageView> createTextureImage(
+    vk::UniqueDevice& device, vk::PhysicalDevice physicalDevice,
+    uint32_t width, const std::string& name) 
+{
+    vk::ImageCreateInfo imageInfo(
+        {}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm,
+        { width, width, 1 }, 1, 1, vk::SampleCountFlagBits::e1,
+        vk::ImageTiling::eOptimal,
+        vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+        vk::SharingMode::eExclusive);
+
+    auto image = device->createImageUnique(imageInfo);
+
+    vk::MemoryRequirements memRequirements = device->getImageMemoryRequirements(*image);
+    vk::MemoryAllocateInfo allocInfo(
+        memRequirements.size,
+        findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eDeviceLocal));
+
+    auto imageMemory = device->allocateMemoryUnique(allocInfo);
+    device->bindImageMemory(*image, *imageMemory, 0);
+
+    vk::ImageViewCreateInfo viewInfo(
+        {}, *image, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm,
+        {}, { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
+
+    auto imageView = device->createImageViewUnique(viewInfo);
+
+    return { std::move(image), std::move(imageMemory), std::move(imageView) };
+}
+
+glm::vec4 getControl(GLFWwindow* window)
+{
+    glm::vec4 control{ 0.0f, 0.0f, 0.0f, 0.0f };
+    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) control.x = 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) control.y = 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) control.z = 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) control.w = 1.0f;
+    return control;
+}
+
 void shaderPrinter(
     const vk::UniqueDevice& device, 
-    const vk::UniqueDeviceMemory vertexBufferMemory) 
+    const vk::UniqueDeviceMemory& vertexBufferMemory) 
 {
     void* mappedData;
     vkMapMemory(*device, *vertexBufferMemory, 0, sizeof(Vertex) * 4, 0, &mappedData); // 只映射前4个顶点
@@ -106,7 +169,7 @@ void shaderPrinter(
     Vertex* vertices = (Vertex*)mappedData;
     printf("---- 顶点数据验证 ----\n");
     for (int i = 0; i < 4; i++) {
-        uint16_t index = 8;//想打印第几个正方形（n*4）
+        uint16_t index = 0;//想打印第几个正方形（n*4）
         printf("顶点%d: pos=(%.2f, %.2f), color=(%.2f, %.2f, %.2f)\n",
             i,
             vertices[i + index].pos[0], vertices[i + index].pos[1],

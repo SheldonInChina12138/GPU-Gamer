@@ -1,14 +1,8 @@
 #include "Tools.h" // memcpy
 
-const int WIDTH = 800;
-const int HEIGHT = 800;
-
-const int Grid_Dimen = 4;//方阵维度
-const int VERTEX_COUNT = Grid_Dimen * Grid_Dimen * 4;
-const int INDEX_COUNT = Grid_Dimen * Grid_Dimen * 6;
-
 int main() {
     //==============Init Vulkan===================
+#pragma region Init Vulkan
     GLFWwindow* window = InitWindow(WIDTH, HEIGHT, "Gamer");
     vk::UniqueInstance instance = InitInstance();
     vk::SurfaceKHR surface = InitSurface(instance, window);
@@ -48,17 +42,25 @@ int main() {
 
     // 创建 Framebuffers
     std::vector<vk::UniqueFramebuffer> framebuffers = InitFrameBuffer(imageViews, renderPass, extent, device);
-
-    // Uniform缓冲改为ComputeUBO
-    auto [uniformBuffer, uniformBufferMemory] = createBuffer(device, physicalDevice,
-        sizeof(ComputeUBO), vk::BufferUsageFlagBits::eUniformBuffer);
+#pragma endregion
+    
+#pragma region vertex & index
+    // Uniform缓冲
+    auto [uniformBuffer, uniformBufferMemory] = createBuffer(device, physicalDevice, sizeof(ComputeUBO), vk::BufferUsageFlagBits::eUniformBuffer);//改为ComputeUBO
+    // StorageBuffer
+    auto [snakeBuffer, snakeBufferMemory] = createBuffer(
+        device,
+        physicalDevice,
+        sizeof(glm::ivec2) * (Grid_Dimen * Grid_Dimen + 3) + sizeof(int) + sizeof(float), // 总大小
+        vk::BufferUsageFlagBits::eStorageBuffer      // 改为Storage Buffer
+    );
 
     // 顶点缓冲
     auto [vertexBuffer, vertexBufferMemory] = createBuffer(device, physicalDevice,
         sizeof(Vertex) * VERTEX_COUNT,
         vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst);//注意：改为Storage Buffer，用来接收ComputeShader计算出的顶点
-    std::cout << "fuck";
-    // 【改】索引缓冲
+
+    // 索引缓冲
     std::vector<uint16_t> indices(INDEX_COUNT);
     // 为每个正方形填充6个索引
     for (int i = 0; i < Grid_Dimen * Grid_Dimen; i++) {
@@ -79,7 +81,7 @@ int main() {
     auto [indexBuffer, indexBufferMemory] = createBuffer(device, physicalDevice,
         sizeof(uint16_t) * INDEX_COUNT,
         vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst);
-    std::cout << "fuck1";
+    
     void* indexData = device->mapMemory(*indexBufferMemory, 0, sizeof(uint16_t) * INDEX_COUNT);
     memcpy(indexData, indices.data(), sizeof(uint16_t) * INDEX_COUNT);
     device->unmapMemory(*indexBufferMemory);
@@ -94,13 +96,70 @@ int main() {
     };
 
     vk::PipelineVertexInputStateCreateInfo vertexInput({}, bindingDesc, attrDesc);
+#pragma endregion
+    
+    // 创建2张纹理 ==============
+    auto [texWorld0, texWorld0Memory, texWorld0View] =
+        createTextureImage(device, physicalDevice, Grid_Dimen, "Tex_world");
+    auto [texGameOver, texGameOverMemory, texGameOverView] =
+        createTextureImage(device, physicalDevice, Grid_Dimen, "Tex_GameOver");
+
+    // 1. 创建临时命令池用于布局转换
+    vk::CommandPoolCreateInfo cmdPoolInfo(
+        vk::CommandPoolCreateFlagBits::eTransient,
+        computeFamily.value());
+    auto tempCmdPool = device->createCommandPoolUnique(cmdPoolInfo);
+
+    // 2. 分配命令缓冲区
+    auto cmdBuffers = device->allocateCommandBuffersUnique(
+        { *tempCmdPool, vk::CommandBufferLevel::ePrimary, 2 });
+
+    // 3. 为texWorld0设置布局转换
+    cmdBuffers[0]->begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+    vk::ImageMemoryBarrier worldBarrier(
+        {}, {},
+        vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+        *texWorld0,
+        { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
+    cmdBuffers[0]->pipelineBarrier(
+        vk::PipelineStageFlagBits::eTopOfPipe,
+        vk::PipelineStageFlagBits::eComputeShader,
+        {}, 0, nullptr, 0, nullptr, 1, &worldBarrier);
+    cmdBuffers[0]->end();
+
+    // 4. 为texGameOver设置布局转换
+    cmdBuffers[1]->begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+    vk::ImageMemoryBarrier gameOverBarrier(
+        {}, {},
+        vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+        *texGameOver,
+        { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
+    cmdBuffers[1]->pipelineBarrier(
+        vk::PipelineStageFlagBits::eTopOfPipe,
+        vk::PipelineStageFlagBits::eComputeShader,
+        {}, 0, nullptr, 0, nullptr, 1, &gameOverBarrier);
+    cmdBuffers[1]->end();
+
+    // 5. 提交并等待完成
+    vk::SubmitInfo submitInfos[2] = {
+        { {}, {}, *cmdBuffers[0], {} },
+        { {}, {}, *cmdBuffers[1], {} }
+    };
+    computeQueue.submit(2, submitInfos, nullptr);
+    computeQueue.waitIdle();
 
     // 创建计算描述符集布局
-    vk::DescriptorSetLayoutBinding computeBindings[2] = {
-        {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
-        {1, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eCompute}
+    vk::DescriptorSetLayoutBinding computeBindings[5] = {
+    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute}, // 顶点缓冲
+    {1, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eCompute}, // 控制输入
+    {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute}, //蛇身输入
+    {3, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},  // Tex_world
+    {4, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute}   // Tex_GameOver
     };
-    vk::DescriptorSetLayoutCreateInfo computeLayoutInfo({}, 2, computeBindings);
+
+    vk::DescriptorSetLayoutCreateInfo computeLayoutInfo({}, 5, computeBindings);
     auto computeDescriptorSetLayout = device->createDescriptorSetLayoutUnique(computeLayoutInfo);
 
     // 创建计算管线布局
@@ -108,11 +167,13 @@ int main() {
     auto computePipelineLayout = device->createPipelineLayoutUnique(computePipelineLayoutInfo);
 
     // 创建计算描述符池和集合
-    vk::DescriptorPoolSize poolSizes[2] = {
-        {vk::DescriptorType::eStorageBuffer, 1},
-        {vk::DescriptorType::eUniformBuffer, 1}
+    vk::DescriptorPoolSize poolSizes[3] = {
+        {vk::DescriptorType::eStorageBuffer, 2},
+        {vk::DescriptorType::eUniformBuffer, 1},
+        {vk::DescriptorType::eStorageImage, 2} //纹理
     };
-    vk::DescriptorPoolCreateInfo descriptorPoolInfo(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet, 1, 2, poolSizes);
+    vk::DescriptorPoolCreateInfo descriptorPoolInfo(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet, 1, 3, poolSizes);
+    
     auto computeDescriptorPool = device->createDescriptorPoolUnique(descriptorPoolInfo);
 
     auto computeDescriptorSets = device->allocateDescriptorSetsUnique(
@@ -121,12 +182,22 @@ int main() {
     // 更新计算描述符集
     vk::DescriptorBufferInfo vertexBufferInfo(*vertexBuffer, 0, VK_WHOLE_SIZE);
     vk::DescriptorBufferInfo uniformBufferInfo(*uniformBuffer, 0, sizeof(ComputeUBO));
-
-    vk::WriteDescriptorSet descriptorWrites[2] = {
+    vk::DescriptorBufferInfo snakeBufferInfo(*snakeBuffer, 0, VK_WHOLE_SIZE);
+    vk::DescriptorImageInfo worldImageInfo(
+        nullptr, *texWorld0View, vk::ImageLayout::eGeneral);  // 注意布局改为eGeneral
+    vk::DescriptorImageInfo gameOverImageInfo(
+        nullptr, *texGameOverView, vk::ImageLayout::eGeneral);
+    
+    vk::WriteDescriptorSet descriptorWrites[5] = {
         {*computeDescriptorSets[0], 0, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &vertexBufferInfo},
-        {*computeDescriptorSets[0], 1, 0, 1, vk::DescriptorType::eUniformBuffer, nullptr, &uniformBufferInfo}
+        {*computeDescriptorSets[0], 1, 0, 1, vk::DescriptorType::eUniformBuffer, nullptr, &uniformBufferInfo},
+        {*computeDescriptorSets[0], 2, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &snakeBufferInfo},
+        {*computeDescriptorSets[0], 3, 0, 1,
+         vk::DescriptorType::eStorageImage, &worldImageInfo},
+        {*computeDescriptorSets[0], 4, 0, 1,
+        vk::DescriptorType::eStorageImage, &gameOverImageInfo}
     };
-    device->updateDescriptorSets(2, descriptorWrites, 0, nullptr);
+    device->updateDescriptorSets(5, descriptorWrites, 0, nullptr);
 
     // 创建计算着色器模块
     auto computeShaderCode = readFile("Shaders/test.comp.spv");
@@ -210,10 +281,11 @@ int main() {
         *computePipelineLayout,
         0, 1, &*computeDescriptorSets[0],
         0, nullptr);
-    computeCommandBuffer->dispatch(2, 2, 1);//【改】这里决定了gl_GlobalInvocationID
+    computeCommandBuffer->dispatch(3, 3, 1);//【改】这里决定了gl_GlobalInvocationID
     computeCommandBuffer->end();
 
     // 帧循环
+    ComputeUBO ubo{};
     auto imageAvailable = device->createSemaphoreUnique({});
     auto renderFinished = device->createSemaphoreUnique({});
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -223,9 +295,13 @@ int main() {
 
         // 更新Uniform数据
         auto currentTime = std::chrono::high_resolution_clock::now();
-        float time = std::chrono::duration<float>(currentTime - startTime).count();
+        static auto lastTime = currentTime; // 静态变量保持状态
+        float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
+        lastTime = currentTime;
 
-        ComputeUBO ubo{ time };
+        // 更新到 UBO
+        ubo.time += deltaTime; // 累计时间
+        ubo.control = getControl(window);
         void* data = device->mapMemory(*uniformBufferMemory, 0, sizeof(ubo));
         memcpy(data, &ubo, sizeof(ubo));
         device->unmapMemory(*uniformBufferMemory);
@@ -234,7 +310,18 @@ int main() {
         vk::SubmitInfo computeSubmitInfo({}, {}, *computeCommandBuffer, *computeFinishedSemaphore);
         computeQueue.submit(computeSubmitInfo, nullptr);
         //--------------打印shader参数----------------
+        /*void* mappedData;
+        vkMapMemory(*device, *snakeBufferMemory, 0, VK_WHOLE_SIZE, 0, &mappedData);
+        SnakeSegment* fuckdata = reinterpret_cast<SnakeSegment*>(mappedData);
+
+        printf("时间：%d，长度：%d，方向：(%d, %d)，食物：(%d, %d)，测试：(%d, %d)，蛇头位置：(%d, %d)\n",
+            fuckdata->recordTime, fuckdata->snakeLen,
+            fuckdata->snakeDir.x, fuckdata->snakeDir.y,
+            fuckdata->foodPos.x, fuckdata->foodPos.y,
+            fuckdata->tempTest.x, fuckdata->tempTest.y,
+            fuckdata->pos.x, fuckdata->pos.y);
         
+        vkUnmapMemory(*device, *vertexBufferMemory);*/
         // 图形部分
         uint32_t imageIndex = device->acquireNextImageKHR(*swapchain, UINT64_MAX, *imageAvailable).value;
 

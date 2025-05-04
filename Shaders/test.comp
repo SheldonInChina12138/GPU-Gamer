@@ -1,17 +1,10 @@
 #version 450
-layout(local_size_x = 2, local_size_y = 2, local_size_z = 1) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-struct Vertex {
-    vec2 pos;
-    vec3 color;
-};
-
-// 方阵维度
-const int GRID_DIMEN = 4;
-// 行列间隙
-const float BIAS = 0.05;
-
-// 单个正方形的4个顶点局部坐标向量
+//-----方阵相关---------
+const int GRID_DIMEN = 20;// 方阵维度
+const int MAX_SEGMENTS = GRID_DIMEN * GRID_DIMEN;
+const float BIAS = 0.05;// 行列间隙
 const vec2 SQUARE_LOCAL_POS[4] = vec2[](
     vec2(-1, -1), // 左下
     vec2( 1, -1), // 右下
@@ -19,42 +12,236 @@ const vec2 SQUARE_LOCAL_POS[4] = vec2[](
     vec2(-1,  1)  // 左上
 );
 
+//------游戏相关---------
+// 颜色定义
+const vec3 COLOR_BG = vec3(0.1, 0.1, 0.3);
+const vec3 COLOR_SNAKE = vec3(1, 0, 0);
+const vec3 COLOR_FOOD = vec3(0, 1, 0);
+const vec3 COLOR_GAMEOVER = vec3(1, 0, 1); // 游戏结束特殊颜色
+const vec3 COLOR_TEST = vec3(1, 1, 1);//测试颜色
+
+// 缓冲区
+struct Vertex {
+    vec2 pos;
+    vec3 color;
+};
+
 layout(std430, binding = 0) buffer VertexBuffer {
     Vertex vertices[];
-};
+};  // 顶点数据
 
 layout(binding = 1) uniform UniformBuffer {
     float time;
+    vec4 control; // WASD控制向量
 } ubo;
 
-void main() {
-    // 计算 2D 线程索引 (x,y)
-    int squareX = int(gl_GlobalInvocationID.x);
-    int squareY = int(gl_GlobalInvocationID.y);
+layout(std430, binding = 2) buffer SnakeBuffer {
+    int recordTime;
+    int snakeLen;
+    ivec2 snakeDir;
+    ivec2 foodPos;
+    ivec2 tempTest;
+    ivec2 segments[MAX_SEGMENTS];  // 直接使用ivec2数组    
+};
+
+layout(binding = 3, rgba8) uniform image2D texWorld;
+layout(binding = 4, rgba8) uniform image2D texGameOver;
+
+//-------------工具函数-----------------
+bool isOnSnake(int len, ivec2 pos) 
+{
+    for (int i = 0; i < len; i++) 
+    {
+        if (segments[i] == pos) return true;
+    }
+    return false;
+}
+
+// 伪随机函数
+int random(int max) {
+    uint h = uint(17) * 0x5bd1e995;  // 乘以质数
+    h ^= h >> 15;                      // 位运算混合
+    return int(h % uint(max));         // 取模限制范围
+}
+
+// 生成新食物位置
+ivec2 generateFoodPosition() {
+    ivec2 pos[MAX_SEGMENTS - 1];//大小规定为确定整数
+    int temp = 0;
+    for (int y = 0; y < GRID_DIMEN; y++) 
+    {
+        for (int x = 0; x < GRID_DIMEN; x++) 
+        {
+            if(!isOnSnake(snakeLen, ivec2(x,y)))
+            {
+                pos[temp++] = ivec2(x,y);//如果该点没有蛇，就加入
+            }
+        }
+    }
+    return pos[random(MAX_SEGMENTS - snakeLen)];
+}
+
+// 更新蛇的移动方向（基于WASD输入）
+void updateSnakeDirection() 
+{
+    if (ubo.control.x > 0.5 && snakeDir.y == 0) snakeDir = ivec2(0, 1);  // 上
+    if (ubo.control.y > 0.5 && snakeDir.y == 0) snakeDir = ivec2(0, -1); // 下
+    if (ubo.control.z > 0.5 && snakeDir.x == 0) snakeDir = ivec2(-1, 0); // 左
+    if (ubo.control.w > 0.5 && snakeDir.x == 0) snakeDir = ivec2(1, 0);  // 右
+}
+
+//写入texWorld
+void writeWorldTex()
+{
+    for (int y = 0; y < GRID_DIMEN; y++) {
+        for (int x = 0; x < GRID_DIMEN; x++) {
+            imageStore(texWorld, ivec2(x,y), vec4(0, 0, 0, 1));
+        }
+    }
+    imageStore(texWorld, foodPos, vec4(0, 1, 0, 1));    
+    for(int i = 0; i < snakeLen; i++)
+    {
+        imageStore(texWorld, segments[i], vec4(1, 0, 0, 1));
+    }
+}
+//game over tex
+void writeGameOverTex()
+{
+    for (int y = 0; y < GRID_DIMEN; y++) 
+    {
+        for (int x = 0; x < GRID_DIMEN; x++) 
+        {
+            imageStore(texGameOver, ivec2(x,y), vec4(0));
+        }
+    }
+    //eyes
+    for(int y = 0; y < 2; y++) 
+    {
+        for (int x = 0; x < 2; x++) 
+        {
+            imageStore(texGameOver, ivec2(x + 6, y + 13), vec4(1, 0, 0, 0));
+            imageStore(texGameOver, ivec2(x + 12, y + 13), vec4(1, 0, 0, 0));
+        }
+    }
+    //mouth
+    for(int i = -1; i < 2; i += 2)
+    {
+        int bias = i > 0 ? 1 : 0;
+        imageStore(texGameOver, ivec2(10 + 4 * i - bias, 7), vec4(1, 0, 0, 0));
+        imageStore(texGameOver, ivec2(10 + 3 * i - bias, 8), vec4(1, 0, 0, 0));
+        imageStore(texGameOver, ivec2(10 + 2 * i - bias, 9), vec4(1, 0, 0, 0));
+        imageStore(texGameOver, ivec2(10 + 1 * i - bias, 10), vec4(1, 0, 0, 0));
+    }
+}
+
+// 检测碰撞
+bool checkCollision(ivec2 pos) 
+{
+    if (pos.x < 0 || pos.x >= GRID_DIMEN || pos.y < 0 || pos.y >= GRID_DIMEN)
+    {
+        return true;
+    }
     
-    // 合并为 1D 索引 (0~3)
-    int squareIndex = squareY * GRID_DIMEN + squareX;
-    if (squareIndex >= GRID_DIMEN * GRID_DIMEN) return;
+    for (int i = 0; i < snakeLen - 1; i++)//注意这里不包括尾巴
+    {
+        if (segments[i] == pos) 
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
-    // 现在 squareIndex 的范围是 0~3（对应 4 个正方形）
-    int row = squareIndex / GRID_DIMEN;//纵向坐标
-    int col = squareIndex % GRID_DIMEN;//横向坐标
+bool Move()
+{
+    ivec2 newPos = segments[0] + snakeDir;
+    
+    if(checkCollision(newPos))
+    {
+        return true;
+    }
+    
+    bool willEat = imageLoad(texWorld, newPos).g > 0.5;
+    int loopCount = willEat ? snakeLen - 1 : snakeLen - 2;
+    for(int i = loopCount; i >= 0; i--)
+    {
+        segments[i + 1] = segments[i]; //所有数据后移
+    }
+    segments[0] = newPos;
+    
+    if(willEat)
+    {
+        snakeLen += 1;
+        foodPos = generateFoodPosition();
+    }
+    return false;
+}
 
-    // 计算中心位置（修正后的版本）
+// 主函数
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixelCoord.x >= GRID_DIMEN || pixelCoord.y >= GRID_DIMEN) return;    
+    bool gameOver = imageLoad(texGameOver, ivec2(0, 1)).a > 0.5;
+    //初始化部分
+    if (pixelCoord.x == 0 && pixelCoord.y == 0)
+    {
+        if(imageLoad(texGameOver, ivec2(0, 0)).a < 0.1)
+        {
+            writeGameOverTex();
+            imageStore(texGameOver, ivec2(0, 0), vec4(0, 0, 0, 1));//初始化位置
+            segments[0] = ivec2(GRID_DIMEN/2, GRID_DIMEN/2);
+            
+            snakeLen = 1;
+            snakeDir = ivec2(1, 0);//初始向右
+            foodPos = generateFoodPosition();
+            recordTime = 1;
+
+            writeWorldTex();// 初始化世界纹理
+        }
+
+        if(!gameOver)
+        {
+            updateSnakeDirection();
+            if (ubo.time > recordTime * 0.5)
+            {
+                recordTime += 1;
+            
+                gameOver = Move();
+                writeWorldTex();
+            }
+        }
+        
+        imageStore(texGameOver, ivec2(0, 1), vec4(0, 0, 0, gameOver ? 1: 0));
+    }
+    barrier();
+    
+    // 渲染逻辑
+    vec3 color = COLOR_BG;
+    vec4 readPixel;
+    if (gameOver) 
+    {
+        readPixel = imageLoad(texGameOver, pixelCoord);
+        if (readPixel.r > 0.5) color = COLOR_GAMEOVER;
+    }
+    else
+    {
+        readPixel = imageLoad(texWorld, pixelCoord);
+        if (readPixel.r > 0.5) color = COLOR_SNAKE;
+        else if (readPixel.g > 0.5) color = COLOR_FOOD;
+    }
+
+    // 计算顶点数据
+    int squareIndex = pixelCoord.y * GRID_DIMEN + pixelCoord.x;
     float cellSize = 2.0 / float(GRID_DIMEN);
     vec2 center = vec2(
-        -1 + cellSize * (0.5 + col),
-        -1 + cellSize * (0.5 + row)
+        -1 + cellSize * (0.5 + pixelCoord.x),
+        -1 + cellSize * (0.5 + pixelCoord.y)
     );
-
+    
     // 写入顶点数据
     for (int i = 0; i < 4; i++) {
         int vertexIndex = squareIndex * 4 + i;
         vertices[vertexIndex].pos = SQUARE_LOCAL_POS[i] * 0.5 * cellSize * (1 - BIAS) + center;
-        vertices[vertexIndex].color = vec3(
-            sin(ubo.time + float(squareIndex)), 
-            cos(ubo.time + float(squareIndex)), 
-            0.5
-        );
+        vertices[vertexIndex].color = color;
     }
 }
